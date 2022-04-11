@@ -1,0 +1,12 @@
+tensorflow==2.5.3
+numpy
+Pillow
+opencv-python
+lmdb
+h5py
+requests
+gdown
+easydict
+tqdm
+termcolor
+seaborn
