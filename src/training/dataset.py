@@ -9,9 +9,12 @@
 import os
 import glob
 import numpy as np
-import tensorflow as tf
+#import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior() 
 import dnnlib
 import dnnlib.tflib as tflib
+
 
 #----------------------------------------------------------------------------
 # Dataset class that loads data from tfrecords files.
@@ -48,6 +51,8 @@ class TFRecordDataset:
         self._tf_minibatch_np   = None
         self._cur_minibatch     = -1
         self._cur_lod           = -1
+
+        tf.compat.v1.disable_eager_execution()
 
         # List tfrecords files and inspect their shapes.
         assert os.path.isdir(self.tfrecord_dir)

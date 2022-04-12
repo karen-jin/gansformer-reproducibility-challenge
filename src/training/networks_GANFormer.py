@@ -1,4 +1,4 @@
-﻿# Copyright (c) 2019, NVIDIA Corporation. All rights reserved.
+# Copyright (c) 2019, NVIDIA Corporation. All rights reserved.
 #
 # This work is made available under the Nvidia Source Code License-NC.
 # To view a copy of this license, visit
@@ -7,7 +7,9 @@
 """Network architectures used in the StyleGAN2 paper."""
 
 import numpy as np
-import tensorflow as tf
+#import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior() 
 import dnnlib
 import dnnlib.tflib as tflib
 from dnnlib.tflib.ops.upfirdn_2d import upsample_2d, downsample_2d, upsample_conv_2d, conv_downsample_2d
@@ -151,7 +153,7 @@ def modulated_conv2d_layer(x,
     mod_bias_var='mod_bias'):
     assert not (up and down)
     assert kernel >= 1 and kernel % 2 == 1
-
+  
     # Get weight.
     w = get_weight([kernel, kernel, x.shape[1].value, fmaps], gain=gain, use_wscale=use_wscale, lrmul=lrmul, weight_var=weight_var)
     ww = w[np.newaxis] # [BkkIO] Introduce minibatch dimension.

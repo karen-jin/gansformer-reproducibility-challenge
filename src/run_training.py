@@ -1,9 +1,4 @@
-# Copyright (c) 2019, NVIDIA Corporation. All rights reserved.
-#
-# This work is made available under the Nvidia Source Code License-NC.
-# To view a copy of this license, visit
-# https://nvlabs.github.io/stylegan2/license.html
-
+# setup
 import argparse
 import copy
 import os
@@ -11,185 +6,122 @@ import sys
 
 import dnnlib
 from dnnlib import EasyDict
-
+import numpy as np
 from metrics.metric_defaults import metric_defaults
 
+
+ganformer=True
+duplex=False
+attention_discriminator=False
+#tfrecords_dataset = 'FFHQ'
+tfrecords_dataset = 'Cartoon'
+img_resolution = 64 if tfrecords_dataset == 'Cartoon' else 128 #Resolution of the Image default 64 for Cartoon 128 for FFHQ
+
+
+
+base_2_log = int(np.log2(img_resolution))
+dataset = 'custom'
+# data_dir = '/content/datasets/' if tfrecords_dataset == 'Cartoon' else '/content/TFRecords_FFHQ/'
+
+# train with mnist dataset
+data_dir = '/content/gansformer-reproducibility-challenge/src'
+img_resolution = 32
+
+num_gpus = 1
+total_kimg = 300
+mirror_augment = True
+metrics = ['fid50k', 'is50k','pr50k3'] #' 
+metrics_10k = ['fid10k']
+gamma = None
+tick_size=16
+result_dir = '/content/drive/MyDrive/model'
+if ganformer:
+    result_dir = '/content/drive/MyDrive/GANFORMER_Duplex/' if duplex else '/content/drive/MyDrive/GANFORMER_Simplex/'
+else:
+    result_dir = '/content/drive/MyDrive/STYLEGAN2/'
 #----------------------------------------------------------------------------
 
-_valid_configs = [
-    # Table 1
-    'config-a', # Baseline StyleGAN
-    'config-b', # + Weight demodulation
-    'config-c', # + Lazy regularization
-    'config-d', # + Path length regularization
-    'config-e', # + No growing, new G & D arch.
-    'config-f', # + Large networks (default)
+train     = EasyDict(run_func_name='training.training_loop.training_loop') # Options for training loop.
+sched     = EasyDict()                                                     # Options for TrainingSchedule.
+grid      = EasyDict(size='1080p', layout='random')                           # Options for setup_snapshot_image_grid().
+sc        = dnnlib.SubmitConfig()                                          # Options for dnnlib.submit_run().
+tf_config = {'rnd.np_random_seed': 1000}                                   # Options for tflib.init_tf().
 
-    # Table 2
-    'config-e-Gorig-Dorig',   'config-e-Gorig-Dresnet',   'config-e-Gorig-Dskip',
-    'config-e-Gresnet-Dorig', 'config-e-Gresnet-Dresnet', 'config-e-Gresnet-Dskip',
-    'config-e-Gskip-Dorig',   'config-e-Gskip-Dresnet',   'config-e-Gskip-Dskip',
-]
 
-#----------------------------------------------------------------------------
+if ganformer:
+  G = EasyDict(func_name='training.networks_GANFormer.G_GANformer', truncation_psi = 0.65, 
+               architecture = 'resnet', latent_size = 32, 
+               dlatent_size = 32, components_num = 16, 
+               mapping_resnet = True, style = True, 
+               fused_modconv = True, local_noise = True, 
+               transformer = True, norm = 'layer', 
+               integration = 'mul', kmeans = duplex, 
+               kmeans_iters = 1, mapping_ltnt2ltnt = True, 
+               use_pos = True, num_heads = 2, 
+               pos_init = 'uniform', pos_directions_num = 2, 
+               merge_layer = -1, start_res = 0, 
+               end_res = base_2_log, img2img = 0, 
+               style_mixing = 0.9, component_mixing = 0.0, 
+               component_dropout = 0.0)       # Options for generator network.
 
-def run(dataset, data_dir, result_dir, config_id, num_gpus, total_kimg, gamma, mirror_augment, metrics):
-    train     = EasyDict(run_func_name='training.training_loop.training_loop') # Options for training loop.
-    G         = EasyDict(func_name='training.networks_stylegan2.G_main')       # Options for generator network.
-    D         = EasyDict(func_name='training.networks_stylegan2.D_stylegan2')  # Options for discriminator network.
-    G_opt     = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for generator optimizer.
-    D_opt     = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for discriminator optimizer.
-    G_loss    = EasyDict(func_name='training.loss.G_logistic_ns_pathreg')      # Options for generator loss.
-    D_loss    = EasyDict(func_name='training.loss.D_logistic_r1')              # Options for discriminator loss.
-    sched     = EasyDict()                                                     # Options for TrainingSchedule.
-    grid      = EasyDict(size='8k', layout='random')                           # Options for setup_snapshot_image_grid().
-    sc        = dnnlib.SubmitConfig()                                          # Options for dnnlib.submit_run().
-    tf_config = {'rnd.np_random_seed': 1000}                                   # Options for tflib.init_tf().
+  if attention_discriminator:
+    func_name='training.networks_GANFormer.D_GANformer'
+  else:
+    func_name='training.networks_GANFormer.D_Stylegan'
+    
+  D = EasyDict(func_name=func_name, latent_size = 32,
+               components_num = 16, mbstd_group_size = 4, 
+               use_pos = True, num_heads = 2, 
+               pos_init = 'uniform', pos_directions_num = 2, 
+               start_res = 0, end_res = base_2_log, img2img = 0)  # Options for discriminator network.
+  G_loss = EasyDict(func_name='training.loss.G_logistic_ns_pathreg')      # Options for generator loss.
+  D_loss = EasyDict(func_name='training.loss.D_logistic_r1')              # Options for discriminator loss.
+  # G_opt = EasyDict(beta1=0.9, beta2=0.999, epsilon=1e-3)                  # Options for generator optimizer.
+  # D_opt = EasyDict(beta1=0.9, beta2=0.999, epsilon=1e-3)                  # Options for discriminator optimizer.
+  G_opt = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for generator optimizer.
+  D_opt = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for discriminator optimizer.
+  desc = 'GANFormer'
+else:
+  G = EasyDict(func_name='training.networks_stylegan2.G_main')       # Options for generator network.
+  D = EasyDict(func_name='training.networks_stylegan2.D_stylegan2')  # Options for discriminator network.
+  G_loss = EasyDict(func_name='training.loss_stylegan2.G_logistic_ns_pathreg')      # Options for generator loss.
+  D_loss = EasyDict(func_name='training.loss_stylegan2.D_logistic_r1')              # Options for discriminator loss.
+  G_opt = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for generator optimizer.
+  D_opt = EasyDict(beta1=0.0, beta2=0.99, epsilon=1e-8)                  # Options for discriminator optimizer.
+  desc = 'stylegan2'
 
-    train.data_dir = data_dir
-    train.total_kimg = total_kimg
-    train.mirror_augment = mirror_augment
-    train.image_snapshot_ticks = train.network_snapshot_ticks = 10
-    sched.G_lrate_base = sched.D_lrate_base = 0.002
-    sched.minibatch_size_base = 32
-    sched.minibatch_gpu_base = 4
-    D_loss.gamma = 10
-    metrics = [metric_defaults[x] for x in metrics]
-    desc = 'stylegan2'
 
-    desc += '-' + dataset
-    dataset_args = EasyDict(tfrecord_dir=dataset)
 
-    assert num_gpus in [1, 2, 4, 8]
-    sc.num_gpus = num_gpus
-    desc += '-%dgpu' % num_gpus
+train.data_dir = data_dir
+train.total_kimg = total_kimg
+train.mirror_augment = mirror_augment
+train.image_snapshot_ticks = train.network_snapshot_ticks = 1
+sched.G_lrate_base = sched.D_lrate_base = 0.002
+sched.minibatch_size_base = 24
+sched.minibatch_gpu_base = 12
+D_loss.gamma = 10
+metrics = [metric_defaults[x] for x in metrics]
+metrics_10k = [metric_defaults[x] for x in metrics_10k]
 
-    assert config_id in _valid_configs
-    desc += '-' + config_id
 
-    # Configs A-E: Shrink networks to match original StyleGAN.
-    if config_id != 'config-f':
-        G.fmap_base = D.fmap_base = 8 << 10
+desc += '-' + dataset
+dataset_args = EasyDict(tfrecord_dir=dataset, resolution=img_resolution)
 
-    # Config E: Set gamma to 100 and override G & D architecture.
-    if config_id.startswith('config-e'):
-        D_loss.gamma = 100
-        if 'Gorig'   in config_id: G.architecture = 'orig'
-        if 'Gskip'   in config_id: G.architecture = 'skip' # (default)
-        if 'Gresnet' in config_id: G.architecture = 'resnet'
-        if 'Dorig'   in config_id: D.architecture = 'orig'
-        if 'Dskip'   in config_id: D.architecture = 'skip'
-        if 'Dresnet' in config_id: D.architecture = 'resnet' # (default)
+assert num_gpus in [1, 2, 4, 8]
+sc.num_gpus = num_gpus
+desc += '-%dgpu' % num_gpus
 
-    # Configs A-D: Enable progressive growing and switch to networks that support it.
-    if config_id in ['config-a', 'config-b', 'config-c', 'config-d']:
-        sched.lod_initial_resolution = 8
-        sched.G_lrate_base = sched.D_lrate_base = 0.001
-        sched.G_lrate_dict = sched.D_lrate_dict = {128: 0.0015, 256: 0.002, 512: 0.003, 1024: 0.003}
-        sched.minibatch_size_base = 32 # (default)
-        sched.minibatch_size_dict = {8: 256, 16: 128, 32: 64, 64: 32}
-        sched.minibatch_gpu_base = 4 # (default)
-        sched.minibatch_gpu_dict = {8: 32, 16: 16, 32: 8, 64: 4}
-        G.synthesis_func = 'G_synthesis_stylegan_revised'
-        D.func_name = 'training.networks_stylegan2.D_stylegan'
+if gamma is not None:
+    D_loss.gamma = gamma
 
-    # Configs A-C: Disable path length regularization.
-    if config_id in ['config-a', 'config-b', 'config-c']:
-        G_loss = EasyDict(func_name='training.loss.G_logistic_ns')
-
-    # Configs A-B: Disable lazy regularization.
-    if config_id in ['config-a', 'config-b']:
-        train.lazy_regularization = False
-
-    # Config A: Switch to original StyleGAN networks.
-    if config_id == 'config-a':
-        G = EasyDict(func_name='training.networks_stylegan.G_style')
-        D = EasyDict(func_name='training.networks_stylegan.D_basic')
-
-    if gamma is not None:
-        D_loss.gamma = gamma
-
-    sc.submit_target = dnnlib.SubmitTarget.LOCAL
-    sc.local.do_not_copy_source_files = True
-    kwargs = EasyDict(train)
-    kwargs.update(G_args=G, D_args=D, G_opt_args=G_opt, D_opt_args=D_opt, G_loss_args=G_loss, D_loss_args=D_loss)
-    kwargs.update(dataset_args=dataset_args, sched_args=sched, grid_args=grid, metric_arg_list=metrics, tf_config=tf_config)
-    kwargs.submit_config = copy.deepcopy(sc)
-    kwargs.submit_config.run_dir_root = result_dir
-    kwargs.submit_config.run_desc = desc
-    dnnlib.submit_run(**kwargs)
+sc.submit_target = dnnlib.SubmitTarget.LOCAL
+sc.local.do_not_copy_source_files = True
 
 #----------------------------------------------------------------------------
-
-def _str_to_bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ('yes', 'true', 't', 'y', '1'):
-        return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-        return False
-    else:
-        raise argparse.ArgumentTypeError('Boolean value expected.')
-
-def _parse_comma_sep(s):
-    if s is None or s.lower() == 'none' or s == '':
-        return []
-    return s.split(',')
-
-#----------------------------------------------------------------------------
-
-_examples = '''examples:
-
-  # Train StyleGAN2 using the FFHQ dataset
-  python %(prog)s --num-gpus=8 --data-dir=~/datasets --config=config-f --dataset=ffhq --mirror-augment=true
-
-valid configs:
-
-  ''' + ', '.join(_valid_configs) + '''
-
-valid metrics:
-
-  ''' + ', '.join(sorted([x for x in metric_defaults.keys()])) + '''
-
-'''
-
-def main():
-    parser = argparse.ArgumentParser(
-        description='Train StyleGAN2.',
-        epilog=_examples,
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument('--result-dir', help='Root directory for run results (default: %(default)s)', default='results', metavar='DIR')
-    parser.add_argument('--data-dir', help='Dataset root directory', required=True)
-    parser.add_argument('--dataset', help='Training dataset', required=True)
-    parser.add_argument('--config', help='Training config (default: %(default)s)', default='config-f', required=True, dest='config_id', metavar='CONFIG')
-    parser.add_argument('--num-gpus', help='Number of GPUs (default: %(default)s)', default=1, type=int, metavar='N')
-    parser.add_argument('--total-kimg', help='Training length in thousands of images (default: %(default)s)', metavar='KIMG', default=25000, type=int)
-    parser.add_argument('--gamma', help='R1 regularization weight (default is config dependent)', default=None, type=float)
-    parser.add_argument('--mirror-augment', help='Mirror augment (default: %(default)s)', default=False, metavar='BOOL', type=_str_to_bool)
-    parser.add_argument('--metrics', help='Comma-separated list of metrics or "none" (default: %(default)s)', default='fid50k', type=_parse_comma_sep)
-
-    args = parser.parse_args()
-
-    if not os.path.exists(args.data_dir):
-        print ('Error: dataset root directory does not exist.')
-        sys.exit(1)
-
-    if args.config_id not in _valid_configs:
-        print ('Error: --config value must be one of: ', ', '.join(_valid_configs))
-        sys.exit(1)
-
-    for metric in args.metrics:
-        if metric not in metric_defaults:
-            print ('Error: unknown metric \'%s\'' % metric)
-            sys.exit(1)
-
-    run(**vars(args))
-
-#----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    main()
-
-#----------------------------------------------------------------------------
-
+kwargs = EasyDict(train)
+kwargs.update(G_args=G, D_args=D, G_opt_args=G_opt, D_opt_args=D_opt, G_loss_args=G_loss, D_loss_args=D_loss)
+kwargs.update(dataset_args=dataset_args, sched_args=sched, grid_args=grid, metric_arg_list=metrics, metrics_10k_arg_list=metrics_10k, tf_config=tf_config,tick_size=tick_size, ganformer=ganformer,resume_pkl=None,resume_kimg =300)
+kwargs.submit_config = copy.deepcopy(sc)
+kwargs.submit_config.run_dir_root = result_dir
+kwargs.submit_config.run_desc = desc
+dnnlib.submit_run(**kwargs)

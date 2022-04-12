@@ -12,7 +12,9 @@ import re
 import uuid
 import sys
 import numpy as np
-import tensorflow as tf
+#import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior() 
 
 from collections import OrderedDict
 from typing import Any, List, Tuple, Union
@@ -25,6 +27,7 @@ from .tfutil import TfExpression, TfExpressionEx
 _import_handlers = []  # Custom import handlers for dealing with legacy data in pickle import.
 _import_module_src = dict()  # Source code for temporary modules created during pickle import.
 
+#tf.compat.v1.disable_eager_execution()
 
 def import_handler(handler_func):
     """Function decorator for declaring custom import handlers."""

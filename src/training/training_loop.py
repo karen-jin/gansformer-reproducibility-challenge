@@ -1,13 +1,15 @@
+
 # Copyright (c) 2019, NVIDIA Corporation. All rights reserved.
 #
 # This work is made available under the Nvidia Source Code License-NC.
 # To view a copy of this license, visit
 # https://nvlabs.github.io/stylegan2/license.html
-
-"""Main training script."""
-
+import glob
+import os
 import numpy as np
-import tensorflow as tf
+#import tensorflow as tf
+import tensorflow.compat.v1 as tf
+tf.disable_v2_behavior() 
 import dnnlib
 import dnnlib.tflib as tflib
 from dnnlib.tflib.autosummary import autosummary
@@ -15,6 +17,8 @@ from dnnlib.tflib.autosummary import autosummary
 from training import dataset
 from training import misc
 from metrics import metric_base
+from metrics.metric_defaults import metric_defaults
+import gc
 
 #----------------------------------------------------------------------------
 # Just-in-time processing of training images before feeding them to the networks.
@@ -50,7 +54,7 @@ def training_schedule(
     lod_initial_resolution  = None,     # Image resolution used at the beginning.
     lod_training_kimg       = 600,      # Thousands of real images to show before doubling the resolution.
     lod_transition_kimg     = 600,      # Thousands of real images to show when fading in new layers.
-    minibatch_size_base     = 32,       # Global minibatch size.
+    minibatch_size_base     = 16,       # Global minibatch size.
     minibatch_size_dict     = {},       # Resolution-specific overrides.
     minibatch_gpu_base      = 4,        # Number of samples processed at a time by one GPU.
     minibatch_gpu_dict      = {},       # Resolution-specific overrides.
@@ -59,8 +63,8 @@ def training_schedule(
     D_lrate_base            = 0.002,    # Learning rate for the discriminator.
     D_lrate_dict            = {},       # Resolution-specific overrides.
     lrate_rampup_kimg       = 0,        # Duration of learning rate ramp-up.
-    tick_kimg_base          = 4,        # Default interval of progress snapshots.
-    tick_kimg_dict          = {8:28, 16:24, 32:20, 64:16, 128:12, 256:8, 512:6, 1024:4}): # Resolution-specific overrides.
+    tick_kimg_base          = 160,        # Default interval of progress snapshots.
+    tick_size               = 16): # Resolution-specific overrides.
 
     # Initialize result dict.
     s = dnnlib.EasyDict()
@@ -70,7 +74,6 @@ def training_schedule(
     phase_dur = lod_training_kimg + lod_transition_kimg
     phase_idx = int(np.floor(s.kimg / phase_dur)) if phase_dur > 0 else 0
     phase_kimg = s.kimg - phase_idx * phase_dur
-
     # Level-of-detail and resolution.
     if lod_initial_resolution is None:
         s.lod = 0.0
@@ -96,11 +99,10 @@ def training_schedule(
         s.D_lrate *= rampup
 
     # Other parameters.
-    s.tick_kimg = tick_kimg_dict.get(s.resolution, tick_kimg_base)
+    s.tick_kimg = tick_size
     return s
 
-#----------------------------------------------------------------------------
-# Main training script.
+
 
 def training_loop(
     G_args                  = {},       # Options for generator network.
@@ -113,6 +115,7 @@ def training_loop(
     sched_args              = {},       # Options for train.TrainingSchedule.
     grid_args               = {},       # Options for train.setup_snapshot_image_grid().
     metric_arg_list         = [],       # Options for MetricGroup.
+    metrics_10k_arg_list    = [],       # Options for MetricGroup_10k.
     tf_config               = {},       # Options for tflib.init_tf().
     data_dir                = None,     # Directory to load datasets from.
     G_smoothing_kimg        = 10.0,     # Half-life of the running average of generator weights.
@@ -124,14 +127,17 @@ def training_loop(
     total_kimg              = 25000,    # Total length of the training, measured in thousands of real images.
     mirror_augment          = False,    # Enable mirror augment?
     drange_net              = [-1,1],   # Dynamic range used when feeding image data to the networks.
-    image_snapshot_ticks    = 50,       # How often to save image snapshots? None = only save 'reals.png' and 'fakes-init.png'.
-    network_snapshot_ticks  = 50,       # How often to save network snapshots? None = only save 'networks-final.pkl'.
+    image_snapshot_ticks    = 1,       # How often to save image snapshots? None = only save 'reals.png' and 'fakes-init.png'.
+    network_snapshot_ticks  = 1,       # How often to save network snapshots? None = only save 'networks-final.pkl'.
     save_tf_graph           = False,    # Include full TensorFlow computation graph in the tfevents file?
     save_weight_histograms  = False,    # Include weight histograms in the tfevents file?
     resume_pkl              = None,     # Network pickle to resume training from, None = train from scratch.
-    resume_kimg             = 0.0,      # Assumed training progress at the beginning. Affects reporting and training schedule.
+    resume_kimg             = 0,      # Assumed training progress at the beginning. Affects reporting and training schedule.
     resume_time             = 0.0,      # Assumed wallclock time at the beginning. Affects reporting.
-    resume_with_new_nets    = False):   # Construct new networks according to G_args and D_args before resuming training?
+    resume_with_new_nets    = False,
+    tick_size               = 16,
+    snapshot_saving_size    = 2,        # Number of snapshots to save
+    ganformer=True):   # Construct new networks according to G_args and D_args before resuming training?
 
     # Initialize dnnlib and TensorFlow.
     tflib.init_tf(tf_config)
@@ -157,10 +163,13 @@ def training_loop(
 
     # Print layers and generate initial image snapshot.
     G.print_layers(); D.print_layers()
-    sched = training_schedule(cur_nimg=total_kimg*1000, training_set=training_set, **sched_args)
+    sched = training_schedule(cur_nimg=total_kimg*1000, training_set=training_set, tick_size=tick_size, **sched_args)
     grid_latents = np.random.randn(np.prod(grid_size), *G.input_shape[1:])
     grid_fakes = Gs.run(grid_latents, grid_labels, is_validation=True, minibatch_size=sched.minibatch_gpu)
-    misc.save_image_grid(grid_fakes, dnnlib.make_run_dir_path('fakes_init.png'), drange=drange_net, grid_size=grid_size)
+    grid=grid_fakes
+    if ganformer:
+      grid=grid_fakes[0]
+    misc.save_image_grid(grid, dnnlib.make_run_dir_path('fakes_init.png'), drange=drange_net, grid_size=grid_size)
 
     # Setup training inputs.
     print('Building TensorFlow graph...')
@@ -199,7 +208,7 @@ def training_loop(
 
             # Fetch training data via temporary variables.
             with tf.name_scope('DataFetch'):
-                sched = training_schedule(cur_nimg=int(resume_kimg*1000), training_set=training_set, **sched_args)
+                sched = training_schedule(cur_nimg=int(resume_kimg*1000), training_set=training_set,tick_size=tick_size, **sched_args)
                 reals_var = tf.Variable(name='reals', trainable=False, initial_value=tf.zeros([sched.minibatch_gpu] + training_set.shape))
                 labels_var = tf.Variable(name='labels', trainable=False, initial_value=tf.zeros([sched.minibatch_gpu, training_set.label_size]))
                 reals_write, labels_write = training_set.get_minibatch_tf()
@@ -254,6 +263,7 @@ def training_loop(
     if save_weight_histograms:
         G.setup_weight_histograms(); D.setup_weight_histograms()
     metrics = metric_base.MetricGroup(metric_arg_list)
+    metrics_10k = metric_base.MetricGroup(metrics_10k_arg_list)
 
     print('Training for %d kimg...\n' % total_kimg)
     dnnlib.RunContext.get().update('', cur_epoch=resume_kimg, max_epoch=total_kimg)
@@ -267,7 +277,7 @@ def training_loop(
         if dnnlib.RunContext.get().should_stop(): break
 
         # Choose training parameters and configure training ops.
-        sched = training_schedule(cur_nimg=cur_nimg, training_set=training_set, **sched_args)
+        sched = training_schedule(cur_nimg=cur_nimg, training_set=training_set,tick_size=tick_size, **sched_args)
         assert sched.minibatch_size % (sched.minibatch_gpu * num_gpus) == 0
         training_set.configure(sched.minibatch_gpu, sched.lod)
         if reset_opt_for_new_lod:
@@ -334,12 +344,19 @@ def training_loop(
             # Save snapshots.
             if image_snapshot_ticks is not None and (cur_tick % image_snapshot_ticks == 0 or done):
                 grid_fakes = Gs.run(grid_latents, grid_labels, is_validation=True, minibatch_size=sched.minibatch_gpu)
-                misc.save_image_grid(grid_fakes, dnnlib.make_run_dir_path('fakes%06d.png' % (cur_nimg // 1000)), drange=drange_net, grid_size=grid_size)
+                grid=grid_fakes
+                if ganformer:
+                  grid=grid_fakes[0]
+                misc.save_image_grid(grid, dnnlib.make_run_dir_path('fakes%06d.png') % (cur_nimg // 1000), drange=drange_net, grid_size=grid_size)
             if network_snapshot_ticks is not None and (cur_tick % network_snapshot_ticks == 0 or done):
-                pkl = dnnlib.make_run_dir_path('network-snapshot-%06d.pkl' % (cur_nimg // 1000))
+                pkl = dnnlib.make_run_dir_path('network-snapshot-%06d.pkl') % (cur_nimg // 1000)
                 misc.save_pkl((G, D, Gs), pkl)
-                metrics.run(pkl, run_dir=dnnlib.make_run_dir_path(), data_dir=dnnlib.convert_path(data_dir), num_gpus=num_gpus, tf_config=tf_config)
-
+                metrics_10k.run(dnnlib.make_run_dir_path(('network-snapshot-%06d.pkl')% (cur_nimg // 1000)), run_dir=dnnlib.make_run_dir_path(), data_dir=dnnlib.convert_path(data_dir), num_gpus=num_gpus, tf_config=tf_config, ganformer=ganformer)
+                gc.collect(generation=2)
+            if snapshot_saving_size > 0:
+              files_to_remove = sorted(glob.glob(dnnlib.make_run_dir_path("network*.pkl")))[:-snapshot_saving_size]
+              for f in files_to_remove:
+                os.remove(f)
             # Update summaries and RunContext.
             metrics.update_autosummaries()
             tflib.autosummary.save_summaries(summary_log, cur_nimg)
@@ -348,9 +365,11 @@ def training_loop(
 
     # Save final snapshot.
     misc.save_pkl((G, D, Gs), dnnlib.make_run_dir_path('network-final.pkl'))
-
+    metrics.run(dnnlib.make_run_dir_path('network-final.pkl'), run_dir=dnnlib.make_run_dir_path(), data_dir=dnnlib.convert_path(data_dir), num_gpus=num_gpus, tf_config=tf_config, ganformer=ganformer)
     # All done.
     summary_log.close()
     training_set.close()
 
-#----------------------------------------------------------------------------
+  #----------------------------------------------------------------------------
+
+
